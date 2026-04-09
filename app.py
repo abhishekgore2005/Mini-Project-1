@@ -1,124 +1,154 @@
 import streamlit as st
-import streamlit_authenticator as stauth
-import yaml
-from yaml.loader import SafeLoader
 import pypdf
 import smtplib
 import re
 import pandas as pd
-import sqlite3
-from datetime import datetime
-from collections import Counter
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# --- 1. PAGE CONFIG ---
-st.set_page_config(page_title="AI Resume Screener Pro", layout="wide")
+# --- HELPER FUNCTIONS ---
 
-# --- 2. DATABASE ---
-def init_db():
-    conn = sqlite3.connect('resume_history.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS candidates
-                 (date TEXT, filename TEXT, email TEXT, score REAL, status TEXT, missing_skills TEXT)''')
-    conn.commit()
-    conn.close()
-
-def save_to_db(data_list):
-    conn = sqlite3.connect('resume_history.db')
-    c = conn.cursor()
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    for row in data_list:
-        c.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?)", 
-                  (timestamp, row['Filename'], row['Email'], row['Score'], row['Status'], row['Missing Skills']))
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# --- 3. LOGIC FUNCTIONS ---
 def extract_text_from_pdf(file):
     try:
         pdf_reader = pypdf.PdfReader(file)
-        text = "".join([page.extract_text() or "" for page in pdf_reader.pages])
-        return text.lower()
-    except: return ""
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() or ""
+        return text
+    except Exception:
+        return ""
 
-def calculate_score_nlp(resume_text, required_skills, required_edu):
-    jd = " ".join(required_skills + required_edu)
-    vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words='english')
-    try:
-        tfidf = vectorizer.fit_transform([resume_text, jd])
-        score = round(cosine_similarity(tfidf[0:1], tfidf[1:2])[0][0] * 100, 2)
-    except: score = 0.0
-    missing = [s for s in required_skills if s not in resume_text]
-    return score, missing
+def extract_email_from_text(text):
+    email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    match = re.search(email_pattern, text)
+    return match.group(0) if match else None
 
-def send_email(to_email, subject, body, s_email, s_pass):
+def calculate_score(text, req_skills, req_edu):
+    text = text.lower()
+    
+    # 1. Education Scoring (30%)
+    edu_matches = [edu for edu in req_edu if re.search(rf'\b{re.escape(edu.lower())}\b', text)]
+    edu_score = 30 if edu_matches else 0
+        
+    # 2. Skills Scoring (70%)
+    skill_matches = [skill for skill in req_skills if re.search(rf'\b{re.escape(skill.lower())}\b', text)]
+    
+    if req_skills:
+        skill_score = (len(skill_matches) / len(req_skills)) * 70
+    else:
+        skill_score = 70 
+        
+    total_score = round(edu_score + skill_score, 2)
+    return total_score, skill_matches, edu_matches
+
+def send_email(to_email, subject, body, sender_mail, sender_pw):
     try:
         msg = MIMEMultipart()
-        msg['From'] = f"Hire Bot <{s_email}>"
+        msg['From'] = sender_mail
         msg['To'] = to_email
         msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'html'))
+        msg.attach(MIMEText(body, 'plain'))
+
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
-        server.login(s_email, s_pass)
-        server.sendmail(s_email, to_email, msg.as_string())
+        server.login(sender_mail, sender_pw)
+        server.sendmail(sender_mail, to_email, msg.as_string())
         server.quit()
         return True
-    except: return False
+    except Exception:
+        return False
 
-# --- 4. AUTHENTICATION ---
-try:
-    with open('config.yaml') as file:
-        config = yaml.load(file, Loader=SafeLoader)
-    authenticator = stauth.Authenticate(
-        config['credentials'], config['cookie']['name'],
-        config['cookie']['key'], config['cookie']['expiry_days']
-    )
-    name, auth_status, username = authenticator.login('Login', 'main')
-except Exception as e:
-    st.error(f"Config file error: Check if 'config.yaml' exists on GitHub.")
-    st.stop()
+# --- STREAMLIT UI ---
+st.set_page_config(page_title="AI Resume Screener Pro", layout="wide")
+st.title("🚀 Smart Resume Screening & Automation")
 
-if auth_status:
-    authenticator.logout('Logout', 'sidebar')
-    st.title("🚀 AI Resume Screener Pro")
+# --- SIDEBAR CONFIGURATION ---
+with st.sidebar:
+    st.header("⚙️ Recruitment Settings")
     
-    with st.sidebar:
-        st.header("Settings")
-        req_skills = st.text_area("Skills", "python, sql, power bi")
-        cutoff = st.slider("Min Score %", 0, 100, 40)
-        enable_email = st.checkbox("Enable Auto-Email")
-        # Cloud secrets use karein ya manual input
-        s_email = st.text_input("Sender Email", value=st.secrets.get("email", {}).get("address", ""))
-        s_pass = st.text_input("App Password", type="password", value=st.secrets.get("email", {}).get("password", ""))
+    REQUIRED_SKILLS = st.multiselect(
+        "Required Skills", 
+        ["Python", "SQL", "Machine Learning", "Tableau", "Excel", "Java", "AWS", "Communication", "React", "Docker"],
+        default=["Python", "SQL", "Machine Learning"]
+    )
+    
+    REQUIRED_EDUCATION = st.multiselect(
+        "Required Education/Degrees",
+        ["B.Tech", "M.Tech", "Computer Science", "MCA", "BCA", "Data Science", "MBA"],
+        default=["B.Tech", "Computer Science"]
+    )
+    
+    CUTOFF_SCORE = st.slider("Pass Cutoff Score (%)", 0, 100, 65)
+    
+    st.divider()
+    
+    st.header("📧 Email Settings")
+    enable_email = st.checkbox("Enable Email Automation", value=False)
+    SENDER_EMAIL = st.text_input("Sender Email", value="hirebot.project@gmail.com")
+    SENDER_PASSWORD = st.text_input("App Password", type="password", value="nfyq ghye qzlw bmcb")
 
-    uploaded_files = st.file_uploader("Upload Resumes", type="pdf", accept_multiple_files=True)
+# --- MAIN INTERFACE ---
+col1, col2 = st.columns(2)
+col1.metric("Current Cutoff", f"{CUTOFF_SCORE}%")
+col2.metric("Skill Weight", "70%")
 
-    if uploaded_files and st.button("Analyze"):
-        results = []
-        for file in uploaded_files:
-            text = extract_text_from_pdf(file)
-            email = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b', text)
-            email = email.group(0) if email else None
-            
-            skills_list = [s.strip().lower() for s in req_skills.split(",")]
-            score, missing = calculate_score_nlp(text, skills_list, [])
-            status = "SELECTED" if score >= cutoff else "REJECTED"
-            
-            e_status = "Skipped"
-            if enable_email and email and s_email and s_pass:
-                body = f"Score: {score}%"
-                e_status = "Sent ✅" if send_email(email, "Update", body, s_email, s_pass) else "Failed ❌"
+uploaded_files = st.file_uploader("Upload Candidate Resumes (PDF)", type="pdf", accept_multiple_files=True)
 
-            results.append({"Filename": file.name, "Email": email, "Score": score, "Status": status, "Email Status": e_status, "Missing Skills": ", ".join(missing)})
+if uploaded_files and st.button(f"Analyze {len(uploaded_files)} Resumes"):
+    
+    results_data = []
+    progress_bar = st.progress(0)
+    
+    for i, file in enumerate(uploaded_files):
+        raw_text = extract_text_from_pdf(file)
+        candidate_email = extract_email_from_text(raw_text)
         
-        df = pd.DataFrame(results)
-        st.dataframe(df.style.map(lambda x: 'background-color: #d4edda' if x == 'SELECTED' else 'background-color: #f8d7da', subset=['Status']), use_container_width=True)
-        save_to_db(results)
+        score, found_skills, found_edu = calculate_score(raw_text, REQUIRED_SKILLS, REQUIRED_EDUCATION)
+        
+        status = "SELECTED" if score >= CUTOFF_SCORE else "REJECTED"
+        
+        email_sent = "Disabled"
+        if enable_email and candidate_email:
+            subj = "Update: Application Status" if status == "REJECTED" else "Interview Invitation"
+            body = f"Hello,\n\nYour profile scored {score}%. Status: {status}.\n\nBest regards,\nHR Team"
+            
+            if send_email(candidate_email, subj, body, SENDER_EMAIL, SENDER_PASSWORD):
+                email_sent = "Sent ✅"
+            else:
+                email_sent = "Failed ❌"
+        elif enable_email and not candidate_email:
+            email_sent = "Missing Email ⚠️"
 
-elif auth_status is False: st.error('Invalid Credentials')
+        results_data.append({
+            "Candidate": file.name,
+            "Score": score,
+            "Status": status,
+            "Email": candidate_email,
+            "Email Status": email_sent,
+            "Matched Skills": ", ".join(found_skills)
+        })
+        
+        progress_bar.progress((i + 1) / len(uploaded_files))
+
+    # --- DASHBOARD ---
+    st.divider()
+    df = pd.DataFrame(results_data)
+    
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.write("### Selection Summary")
+        st.dataframe(df['Status'].value_counts())
+    
+    with c2:
+        st.write("### Skill Distribution")
+        st.bar_chart(df.set_index('Candidate')['Score'])
+
+    st.write("### Detailed Candidate Log")
+    def style_status(val):
+        color = '#2ecc71' if val == 'SELECTED' else '#e74c3c'
+        return f'background-color: {color}; color: white; font-weight: bold'
+
+    st.dataframe(df.style.applymap(style_status, subset=['Status']), use_container_width=True)
+    
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download Recruitment Report", csv, "screening_report.csv", "text/csv")
