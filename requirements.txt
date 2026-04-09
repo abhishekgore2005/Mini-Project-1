@@ -2,7 +2,6 @@ streamlit
 pypdf
 pandas
 regex
-streamlit-authenticator
 pyyaml
 pandas
 scikit-learn
