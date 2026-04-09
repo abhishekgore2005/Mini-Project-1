@@ -1,14 +1,10 @@
 import streamlit as st
-import streamlit_authenticator as stauth
-import yaml
-from yaml.loader import SafeLoader
 import pypdf
 import smtplib
 import re
 import pandas as pd
 import sqlite3
 from datetime import datetime
-from collections import Counter
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from email.mime.text import MIMEText
@@ -71,54 +67,56 @@ def send_email(to_email, subject, body, s_email, s_pass):
         return True
     except: return False
 
-# --- 4. AUTHENTICATION ---
-try:
-    with open('config.yaml') as file:
-        config = yaml.load(file, Loader=SafeLoader)
-    authenticator = stauth.Authenticate(
-        config['credentials'], config['cookie']['name'],
-        config['cookie']['key'], config['cookie']['expiry_days']
-    )
-    name, auth_status, username = authenticator.login('Login', 'main')
-except Exception as e:
-    st.error(f"Config file error: Check if 'config.yaml' exists on GitHub.")
-    st.stop()
+# --- 4. MAIN APP INTERFACE ---
+# Authentication removed as requested
+st.title("🚀 AI Resume Screener Pro")
 
-if auth_status:
-    authenticator.logout('Logout', 'sidebar')
-    st.title("🚀 AI Resume Screener Pro")
+with st.sidebar:
+    st.header("Settings")
+    req_skills = st.text_area("Skills (Comma separated)", "python, sql, machine learning")
+    cutoff = st.slider("Min Score %", 0, 100, 40)
+    enable_email = st.checkbox("Enable Auto-Email")
     
-    with st.sidebar:
-        st.header("Settings")
-        req_skills = st.text_area("Skills", "python, sql, power bi")
-        cutoff = st.slider("Min Score %", 0, 100, 40)
-        enable_email = st.checkbox("Enable Auto-Email")
-        # Cloud secrets use karein ya manual input
-        s_email = st.text_input("Sender Email", value=st.secrets.get("email", {}).get("address", ""))
-        s_pass = st.text_input("App Password", type="password", value=st.secrets.get("email", {}).get("password", ""))
+    st.divider()
+    st.subheader("Email Credentials")
+    s_email = st.text_input("Sender Email", value=st.secrets.get("email", {}).get("address", ""))
+    s_pass = st.text_input("App Password", type="password", value=st.secrets.get("email", {}).get("password", ""))
 
-    uploaded_files = st.file_uploader("Upload Resumes", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload Resumes (PDF)", type="pdf", accept_multiple_files=True)
 
-    if uploaded_files and st.button("Analyze"):
-        results = []
-        for file in uploaded_files:
-            text = extract_text_from_pdf(file)
-            email = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b', text)
-            email = email.group(0) if email else None
-            
-            skills_list = [s.strip().lower() for s in req_skills.split(",")]
-            score, missing = calculate_score_nlp(text, skills_list, [])
-            status = "SELECTED" if score >= cutoff else "REJECTED"
-            
-            e_status = "Skipped"
-            if enable_email and email and s_email and s_pass:
-                body = f"Score: {score}%"
-                e_status = "Sent ✅" if send_email(email, "Update", body, s_email, s_pass) else "Failed ❌"
-
-            results.append({"Filename": file.name, "Email": email, "Score": score, "Status": status, "Email Status": e_status, "Missing Skills": ", ".join(missing)})
+if uploaded_files and st.button("Analyze"):
+    results = []
+    progress_bar = st.progress(0)
+    
+    for i, file in enumerate(uploaded_files):
+        text = extract_text_from_pdf(file)
+        email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b', text)
+        email = email_match.group(0) if email_match else None
         
-        df = pd.DataFrame(results)
-        st.dataframe(df.style.map(lambda x: 'background-color: #d4edda' if x == 'SELECTED' else 'background-color: #f8d7da', subset=['Status']), use_container_width=True)
-        save_to_db(results)
+        skills_list = [s.strip().lower() for s in req_skills.split(",")]
+        score, missing = calculate_score_nlp(text, skills_list, [])
+        status = "SELECTED" if score >= cutoff else "REJECTED"
+        
+        e_status = "Skipped"
+        if enable_email and email and s_email and s_pass:
+            body = f"<h3>Application Update</h3><p>Your resume scored <b>{score}%</b>. Status: <b>{status}</b>.</p>"
+            e_status = "Sent ✅" if send_email(email, "Job Application Update", body, s_email, s_pass) else "Failed ❌"
 
-elif auth_status is False: st.error('Invalid Credentials')
+        results.append({
+            "Filename": file.name, 
+            "Email": email, 
+            "Score": score, 
+            "Status": status, 
+            "Email Status": e_status, 
+            "Missing Skills": ", ".join(missing)
+        })
+        progress_bar.progress((i + 1) / len(uploaded_files))
+    
+    # Results View
+    st.divider()
+    df = pd.DataFrame(results)
+    st.dataframe(df.style.map(lambda x: 'background-color: #d4edda' if x == 'SELECTED' else 'background-color: #f8d7da', subset=['Status']), use_container_width=True)
+    
+    # Save to SQLite
+    save_to_db(results)
+    st.success("Analysis complete and saved to history!")
